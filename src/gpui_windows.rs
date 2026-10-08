@@ -2,6 +2,8 @@
 
 mod clipboard;
 mod compat;
+#[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
+mod legacy_com_imports;
 mod destination_list;
 mod dialog;
 mod direct_manipulation;
