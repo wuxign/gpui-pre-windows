@@ -29,6 +29,71 @@ const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
+#[cfg(test)]
+mod legacy_graphics_tests {
+    use super::{DXGI_SWAP_EFFECT_DISCARD, DirectXRenderer};
+    use crate::DirectXDevices;
+    use gpui::{DevicePixels, Scene, WindowBackgroundAppearance, size};
+    use windows::{Win32::UI::WindowsAndMessaging::*, core::w};
+
+    #[test]
+    fn legacy_graphics_draws_and_resizes_discard_swap_chain() {
+        // Run with GPUI_WIN7_COMPAT=1 so this also exercises the old path on modern Windows.
+        if !crate::compat::legacy_mode() {
+            return;
+        }
+        let hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!("GPUI graphics test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                128,
+                128,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        struct Window(windows::Win32::Foundation::HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let _window = Window(hwnd);
+        let devices = DirectXDevices::new().unwrap();
+        let mut renderer = DirectXRenderer::new(hwnd, &devices, true).unwrap();
+        let (width, height) = (64, 48);
+        renderer
+            .resize(size(DevicePixels(width), DevicePixels(height)))
+            .unwrap();
+        let description =
+            unsafe { renderer.resources.as_ref().unwrap().swap_chain.GetDesc() }.unwrap();
+        assert_eq!(description.SwapEffect, DXGI_SWAP_EFFECT_DISCARD);
+        assert_eq!(
+            (description.BufferDesc.Width, description.BufferDesc.Height),
+            (width as u32, height as u32)
+        );
+        let scene = Scene::default();
+        renderer
+            .draw(&scene, WindowBackgroundAppearance::Opaque)
+            .unwrap();
+        let image = renderer
+            .render_to_image(&scene, WindowBackgroundAppearance::Opaque)
+            .unwrap();
+        assert_eq!(image.dimensions(), (width as u32, height as u32));
+        assert_eq!(
+            image.get_pixel((width - 1) as u32, (height - 1) as u32).0,
+            [255, 255, 255, 255]
+        );
+    }
+}
+
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
     pub grayscale_enhanced_contrast: f32,
@@ -60,7 +125,7 @@ pub(crate) struct DirectXRenderer {
 #[derive(Clone)]
 pub(crate) struct DirectXRendererDevices {
     pub(crate) adapter: IDXGIAdapter1,
-    pub(crate) dxgi_factory: IDXGIFactory6,
+    pub(crate) dxgi_factory: IDXGIFactory1,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
     dxgi_device: Option<IDXGIDevice>,
@@ -69,7 +134,7 @@ pub(crate) struct DirectXRendererDevices {
 
 struct DirectXResources {
     // Direct3D rendering objects
-    swap_chain: IDXGISwapChain1,
+    swap_chain: IDXGISwapChain,
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
@@ -853,12 +918,19 @@ impl DirectXRenderer {
     pub(crate) fn get_font_info() -> &'static FontInfo {
         static CACHED_FONT_INFO: OnceLock<FontInfo> = OnceLock::new();
         CACHED_FONT_INFO.get_or_init(|| unsafe {
-            let factory: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
-            let render_params: IDWriteRenderingParams1 =
-                factory.CreateRenderingParams().unwrap().cast().unwrap();
+            let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
+                .expect("DirectWrite factory unavailable");
+            let render_params = factory
+                .CreateRenderingParams()
+                .expect("DirectWrite rendering parameters unavailable");
+            let grayscale_contrast = render_params
+                .cast::<IDWriteRenderingParams1>()
+                .ok()
+                .map(|params| params.GetGrayscaleEnhancedContrast())
+                .unwrap_or_else(|| render_params.GetEnhancedContrast());
             FontInfo {
                 gamma_ratios: gpui::get_gamma_correction_ratios(render_params.GetGamma()),
-                grayscale_enhanced_contrast: render_params.GetGrayscaleEnhancedContrast(),
+                grayscale_enhanced_contrast: grayscale_contrast,
                 subpixel_enhanced_contrast: render_params.GetEnhancedContrast(),
                 is_bgr: render_params.GetPixelGeometry() == DWRITE_PIXEL_GEOMETRY_BGR,
             }
@@ -1024,7 +1096,7 @@ impl DirectComposition {
         })
     }
 
-    pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {
+    pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain) -> Result<()> {
         unsafe {
             self.comp_visual.SetContent(swap_chain)?;
             self.comp_target.SetRoot(&self.comp_visual)?;
@@ -1292,15 +1364,15 @@ impl Drop for DirectXRenderer {
 
 #[inline]
 fn get_comp_device(dxgi_device: &IDXGIDevice) -> Result<IDCompositionDevice> {
-    Ok(unsafe { DCompositionCreateDevice(dxgi_device)? })
+    Ok(crate::compat::composition_device(dxgi_device)?)
 }
 
 fn create_swap_chain_for_composition(
-    dxgi_factory: &IDXGIFactory6,
+    dxgi_factory: &IDXGIFactory1,
     device: &ID3D11Device,
     width: u32,
     height: u32,
-) -> Result<IDXGISwapChain1> {
+) -> Result<IDXGISwapChain> {
     let desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
         Height: height,
@@ -1318,16 +1390,17 @@ fn create_swap_chain_for_composition(
         AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
         Flags: 0,
     };
-    Ok(unsafe { dxgi_factory.CreateSwapChainForComposition(device, &desc, None)? })
+    let factory: IDXGIFactory2 = dxgi_factory.cast()?;
+    Ok(unsafe { factory.CreateSwapChainForComposition(device, &desc, None)? }.cast()?)
 }
 
 fn create_swap_chain(
-    dxgi_factory: &IDXGIFactory6,
+    dxgi_factory: &IDXGIFactory1,
     device: &ID3D11Device,
     hwnd: HWND,
     width: u32,
     height: u32,
-) -> Result<IDXGISwapChain1> {
+) -> Result<IDXGISwapChain> {
     use windows::Win32::Graphics::Dxgi::DXGI_MWA_NO_ALT_ENTER;
 
     let desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -1346,8 +1419,36 @@ fn create_swap_chain(
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
         Flags: 0,
     };
-    let swap_chain =
-        unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) }?;
+    let swap_chain: IDXGISwapChain = if crate::compat::legacy_mode() {
+        let legacy_desc = DXGI_SWAP_CHAIN_DESC {
+            BufferDesc: DXGI_MODE_DESC {
+                Width: width,
+                Height: height,
+                Format: RENDER_TARGET_FORMAT,
+                ..Default::default()
+            },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: BUFFER_COUNT as u32,
+            OutputWindow: hwnd,
+            Windowed: true.into(),
+            SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
+            Flags: 0,
+        };
+        let mut swap_chain = None;
+        unsafe {
+            dxgi_factory
+                .CreateSwapChain(device, &legacy_desc, &mut swap_chain)
+                .ok()?
+        };
+        swap_chain.context("Missing legacy swap chain")?
+    } else {
+        let factory: IDXGIFactory2 = dxgi_factory.cast()?;
+        unsafe { factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None)? }.cast()?
+    };
     unsafe { dxgi_factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER) }?;
     Ok(swap_chain)
 }
@@ -1355,7 +1456,7 @@ fn create_swap_chain(
 #[inline]
 fn create_resources(
     devices: &DirectXRendererDevices,
-    swap_chain: &IDXGISwapChain1,
+    swap_chain: &IDXGISwapChain,
     width: u32,
     height: u32,
 ) -> Result<(
@@ -1394,7 +1495,7 @@ fn create_resources(
 
 #[inline]
 fn create_render_target_and_its_view(
-    swap_chain: &IDXGISwapChain1,
+    swap_chain: &IDXGISwapChain,
     device: &ID3D11Device,
 ) -> Result<(ID3D11Texture2D, Option<ID3D11RenderTargetView>)> {
     let render_target: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0) }?;

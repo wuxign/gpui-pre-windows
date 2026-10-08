@@ -13,10 +13,7 @@ use windows::Win32::{
             D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS,
             D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
         },
-        Dxgi::{
-            CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
-            IDXGIAdapter1, IDXGIFactory6,
-        },
+        Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1},
     },
 };
 use windows::core::Interface;
@@ -38,7 +35,7 @@ pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T
 #[derive(Clone)]
 pub(crate) struct DirectXDevices {
     pub(crate) adapter: IDXGIAdapter1,
-    pub(crate) dxgi_factory: IDXGIFactory6,
+    pub(crate) dxgi_factory: IDXGIFactory1,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
 }
@@ -76,11 +73,31 @@ impl DirectXDevices {
 fn check_debug_layer_available() -> bool {
     #[cfg(debug_assertions)]
     {
-        use windows::Win32::Graphics::Dxgi::{DXGIGetDebugInterface1, IDXGIInfoQueue};
-
-        unsafe { DXGIGetDebugInterface1::<IDXGIInfoQueue>(0) }
-            .log_err()
-            .is_some()
+        use windows::{
+            Win32::Graphics::Dxgi::IDXGIInfoQueue,
+            core::{GUID, Interface},
+        };
+        type Function = unsafe extern "system" fn(
+            u32,
+            *const GUID,
+            *mut *mut std::ffi::c_void,
+        ) -> windows::core::HRESULT;
+        if crate::compat::legacy_mode() {
+            return false;
+        }
+        let Some(function) = crate::compat::system_proc("dxgidebug.dll", c"DXGIGetDebugInterface1")
+        else {
+            return false;
+        };
+        let function: Function = unsafe { std::mem::transmute(function) };
+        let mut result = std::ptr::null_mut();
+        if unsafe { function(0, &IDXGIInfoQueue::IID, &mut result) }.is_err() {
+            return false;
+        }
+        if !result.is_null() {
+            drop(unsafe { IDXGIInfoQueue::from_raw(result) });
+        }
+        true
     }
     #[cfg(not(debug_assertions))]
     {
@@ -89,22 +106,15 @@ fn check_debug_layer_available() -> bool {
 }
 
 #[inline]
-fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
-    let factory_flag = if debug_layer_available {
-        DXGI_CREATE_FACTORY_DEBUG
-    } else {
-        #[cfg(debug_assertions)]
-        log::warn!(
-            "Failed to get DXGI debug interface. DirectX debugging features will be disabled."
-        );
-        DXGI_CREATE_FACTORY_FLAGS::default()
-    };
-    unsafe { Ok(CreateDXGIFactory2(factory_flag)?) }
+fn get_dxgi_factory(_: bool) -> Result<IDXGIFactory1> {
+    // DXGI 1.1 is available on Windows 7. Newer operations query Factory2
+    // at their call sites, rather than requiring Factory6 at startup.
+    unsafe { Ok(CreateDXGIFactory1()?) }
 }
 
 #[inline]
 fn get_adapter(
-    dxgi_factory: &IDXGIFactory6,
+    dxgi_factory: &IDXGIFactory1,
     debug_layer_available: bool,
 ) -> Result<(
     IDXGIAdapter1,
@@ -153,17 +163,23 @@ fn get_device(
         D3D11_CREATE_DEVICE_BGRA_SUPPORT
     };
     unsafe {
+        let legacy_levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1];
+        let modern_levels = [
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+        ];
         D3D11CreateDevice(
             adapter,
             D3D_DRIVER_TYPE_UNKNOWN,
             HMODULE::default(),
             device_flags,
             // 4x MSAA is required for Direct3D Feature Level 10.1 or better
-            Some(&[
-                D3D_FEATURE_LEVEL_11_1,
-                D3D_FEATURE_LEVEL_11_0,
-                D3D_FEATURE_LEVEL_10_1,
-            ]),
+            Some(if crate::compat::legacy_mode() {
+                &legacy_levels[..]
+            } else {
+                &modern_levels[..]
+            }),
             D3D11_SDK_VERSION,
             Some(&mut device),
             feature_level,
