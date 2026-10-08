@@ -1,19 +1,21 @@
 use anyhow::{Context, Result};
-use gpui_util::ResultExt;
 use itertools::Itertools;
 use windows::Win32::{
     Foundation::HMODULE,
     Graphics::{
         Direct3D::{
-            D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_1,
-            D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+            D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
         },
         Direct3D11::{
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
             D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS,
             D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
         },
-        Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1},
+        Dxgi::{
+            CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice,
+            IDXGIFactory1,
+        },
     },
 };
 use windows::core::Interface;
@@ -41,12 +43,27 @@ pub(crate) struct DirectXDevices {
 }
 
 impl DirectXDevices {
+    #[cfg(test)]
+    pub(crate) fn software_for_test() -> Result<Self> {
+        let (adapter, device, device_context, _) = get_software_adapter(false)?;
+        let dxgi_factory = unsafe { adapter.GetParent::<IDXGIFactory1>() }?;
+        Ok(Self {
+            adapter,
+            dxgi_factory,
+            device,
+            device_context,
+        })
+    }
+
     pub(crate) fn new() -> Result<Self> {
         let debug_layer_available = check_debug_layer_available();
         let dxgi_factory =
             get_dxgi_factory(debug_layer_available).context("Creating DXGI factory")?;
         let (adapter, device, device_context, feature_level) =
             get_adapter(&dxgi_factory, debug_layer_available).context("Getting DXGI adapter")?;
+        // Software devices own an adapter too. Use its factory for swap-chain creation.
+        let dxgi_factory = unsafe { adapter.GetParent::<IDXGIFactory1>() }
+            .context("Getting device's DXGI factory")?;
         match feature_level {
             D3D_FEATURE_LEVEL_11_1 => {
                 log::info!("Created device with Direct3D 11.1 feature level.")
@@ -122,8 +139,16 @@ fn get_adapter(
     ID3D11DeviceContext,
     D3D_FEATURE_LEVEL,
 )> {
+    let mut hardware_error = None;
     for adapter_index in 0.. {
-        let adapter: IDXGIAdapter1 = unsafe { dxgi_factory.EnumAdapters(adapter_index)?.cast()? };
+        let adapter: IDXGIAdapter1 = match unsafe { dxgi_factory.EnumAdapters(adapter_index) } {
+            Ok(adapter) => adapter.cast()?,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => {
+                hardware_error = Some(anyhow::Error::from(error).context("Enumerating adapters"));
+                break;
+            }
+        };
         if let Ok(desc) = unsafe { adapter.GetDesc1() } {
             let gpu_name = String::from_utf16_lossy(&desc.Description)
                 .trim_matches(char::from(0))
@@ -134,28 +159,61 @@ fn get_adapter(
         // the device if it does.
         let mut context: Option<ID3D11DeviceContext> = None;
         let mut feature_level = D3D_FEATURE_LEVEL::default();
-        if let Some(device) = get_device(
-            &adapter,
+        match get_device(
+            Some(&adapter),
             Some(&mut context),
             Some(&mut feature_level),
             debug_layer_available,
-        )
-        .log_err()
-        {
-            return Ok((adapter, device, context.unwrap(), feature_level));
+        ) {
+            Ok(device) => return Ok((adapter, device, context.unwrap(), feature_level)),
+            Err(error) => {
+                log::warn!("Adapter {adapter_index} cannot render GPUI: {error:#}");
+                hardware_error = Some(error);
+            }
         }
     }
 
-    unreachable!()
+    log::warn!("No compatible hardware device; trying WARP software rendering");
+    get_software_adapter(debug_layer_available).map_err(|software_error| {
+        anyhow::anyhow!(
+            "No compatible hardware Direct3D device ({}); WARP software fallback failed: {software_error:#}",
+            hardware_error.map_or_else(|| "no adapters were enumerated".to_string(), |error| format!("{error:#}")),
+        )
+    })
+}
+
+fn get_software_adapter(
+    debug: bool,
+) -> Result<(
+    IDXGIAdapter1,
+    ID3D11Device,
+    ID3D11DeviceContext,
+    D3D_FEATURE_LEVEL,
+)> {
+    let mut context = None;
+    let mut level = D3D_FEATURE_LEVEL::default();
+    let device = get_device(None, Some(&mut context), Some(&mut level), debug)
+        .context("Creating WARP device with GPUI's required StructuredBuffer support")?;
+    let dxgi_device: IDXGIDevice = device.cast()?;
+    let adapter = unsafe { dxgi_device.GetAdapter() }?.cast()?;
+    Ok((
+        adapter,
+        device,
+        context.context("WARP device returned no immediate context")?,
+        level,
+    ))
 }
 
 #[inline]
 fn get_device(
-    adapter: &IDXGIAdapter1,
+    adapter: Option<&IDXGIAdapter1>,
     context: Option<*mut Option<ID3D11DeviceContext>>,
     feature_level: Option<*mut D3D_FEATURE_LEVEL>,
     debug_layer_available: bool,
 ) -> Result<ID3D11Device> {
+    let adapter = adapter
+        .map(|adapter| adapter.cast::<IDXGIAdapter>())
+        .transpose()?;
     let mut device: Option<ID3D11Device> = None;
     let device_flags = if debug_layer_available {
         D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG
@@ -170,8 +228,12 @@ fn get_device(
             D3D_FEATURE_LEVEL_10_1,
         ];
         D3D11CreateDevice(
-            adapter,
-            D3D_DRIVER_TYPE_UNKNOWN,
+            adapter.as_ref(),
+            if adapter.is_some() {
+                D3D_DRIVER_TYPE_UNKNOWN
+            } else {
+                D3D_DRIVER_TYPE_WARP
+            },
             HMODULE::default(),
             device_flags,
             // 4x MSAA is required for Direct3D Feature Level 10.1 or better

@@ -45,6 +45,18 @@ mod legacy_graphics_tests {
         if !crate::compat::legacy_mode() {
             return;
         }
+        draw_and_resize(DirectXDevices::new().unwrap());
+    }
+
+    #[test]
+    fn software_graphics_draws_and_resizes_discard_swap_chain() {
+        if !crate::compat::legacy_mode() {
+            return;
+        }
+        draw_and_resize(DirectXDevices::software_for_test().unwrap());
+    }
+
+    fn draw_and_resize(devices: DirectXDevices) {
         let hwnd = unsafe {
             CreateWindowExW(
                 Default::default(),
@@ -69,7 +81,6 @@ mod legacy_graphics_tests {
             }
         }
         let _window = Window(hwnd);
-        let devices = DirectXDevices::new().unwrap();
         let mut renderer = DirectXRenderer::new(hwnd, &devices, true).unwrap();
         for (width, height) in [(64, 48), (96, 72), (48, 36), (128, 96), (64, 48)] {
             renderer
