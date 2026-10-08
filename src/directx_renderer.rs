@@ -34,8 +34,10 @@ mod legacy_graphics_tests {
     use super::{DXGI_SWAP_EFFECT_DISCARD, DirectXRenderer};
     use crate::DirectXDevices;
     use gpui::{
-        Bounds, ContentMask, DevicePixels, Quad, ScaledPixels, Scene, WindowBackgroundAppearance,
-        point, rgb, size,
+        AtlasKey, Bounds, ContentMask, DevicePixels, FontId, GlyphId, MonochromeSprite, Path,
+        PlatformAtlas, PolychromeSprite, Quad, RenderGlyphParams, ScaledPixels, Scene,
+        SubpixelSprite, TransformationMatrix, Underline, WindowBackgroundAppearance, point, px,
+        rgb, size,
     };
     use windows::{Win32::UI::WindowsAndMessaging::*, core::w};
 
@@ -104,6 +106,100 @@ mod legacy_graphics_tests {
                 background: rgb(0xff0000).into(),
                 ..Default::default()
             });
+            let rect = |x, y, w, h| {
+                Bounds::new(
+                    point(ScaledPixels(x), ScaledPixels(y)),
+                    size(ScaledPixels(w), ScaledPixels(h)),
+                )
+            };
+            // Overlap to force separate batches with nonzero starting indices.
+            for (bounds, color) in [
+                (rect(2., 2., 8., 8.), 0x00ff00),
+                (rect(5., 5., 2., 2.), 0x0000ff),
+            ] {
+                scene.insert_primitive(Quad {
+                    bounds,
+                    content_mask: ContentMask { bounds },
+                    background: rgb(color).into(),
+                    ..Default::default()
+                });
+            }
+            scene.insert_primitive(Underline {
+                order: 0,
+                pad: 0,
+                bounds: rect(18., 2., 8., 3.),
+                content_mask: ContentMask { bounds },
+                color: rgb(0xffffff).into(),
+                thickness: ScaledPixels(3.),
+                wavy: false.into(),
+            });
+            let mut path = Path::new(point(px(2.), px(18.)));
+            path.line_to(point(px(10.), px(18.)));
+            path.line_to(point(px(2.), px(26.)));
+            path.color = rgb(0xffff00).into();
+            path.content_mask = ContentMask {
+                bounds: bounds.map(|p| px(p.0)),
+            };
+            scene.insert_primitive(path.scale(1.));
+            let mut tiles = Vec::new();
+            for (is_emoji, subpixel_rendering, channels) in
+                [(false, false, 1), (false, true, 4), (true, false, 4)]
+            {
+                let key = AtlasKey::Glyph(RenderGlyphParams {
+                    font_id: FontId(0),
+                    glyph_id: GlyphId(0),
+                    font_size: px(4.),
+                    subpixel_variant: point(0, 0),
+                    scale_factor: 1.,
+                    is_emoji,
+                    subpixel_rendering,
+                    dilation: 0,
+                });
+                let tile = renderer
+                    .atlas
+                    .get_or_insert_with(key, &mut || {
+                        Ok(Some((
+                            size(DevicePixels(4), DevicePixels(4)),
+                            std::borrow::Cow::Owned(vec![255; 16 * channels]),
+                        )))
+                    })
+                    .unwrap()
+                    .unwrap();
+                tiles.push(tile);
+            }
+            scene.insert_primitive(MonochromeSprite {
+                order: 0,
+                pad: 0,
+                bounds: rect(0., 0., 4., 4.),
+                content_mask: ContentMask { bounds },
+                color: rgb(0xffffff).into(),
+                tile: tiles[0],
+                // Non-symmetric matrix checks row/column layout as well.
+                transformation: TransformationMatrix {
+                    rotation_scale: [[1., 0.5], [0., 1.]],
+                    translation: [18., 18.],
+                },
+            });
+            scene.insert_primitive(SubpixelSprite {
+                order: 0,
+                pad: 0,
+                bounds: rect(28., 18., 4., 4.),
+                content_mask: ContentMask { bounds },
+                color: rgb(0).into(),
+                tile: tiles[1],
+                transformation: TransformationMatrix::unit(),
+            });
+            scene.insert_primitive(PolychromeSprite {
+                order: 0,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.,
+                bounds: rect(36., 18., 4., 4.),
+                content_mask: ContentMask { bounds },
+                corner_radii: Default::default(),
+                tile: tiles[2],
+            });
+            scene.finish();
             renderer
                 .draw(&scene, WindowBackgroundAppearance::Opaque)
                 .unwrap();
@@ -111,6 +207,17 @@ mod legacy_graphics_tests {
                 .render_to_image(&scene, WindowBackgroundAppearance::Opaque)
                 .unwrap();
             assert_eq!(image.dimensions(), (width as u32, height as u32));
+            for (x, y, expected) in [
+                (3, 3, [0, 255, 0, 255]),
+                (5, 5, [0, 0, 255, 255]),
+                (20, 3, [255, 255, 255, 255]),
+                (3, 19, [255, 255, 0, 255]),
+                (22, 21, [255, 255, 255, 255]),
+                (29, 19, [0, 0, 0, 255]),
+                (37, 19, [255, 255, 255, 255]),
+            ] {
+                assert_eq!(image.get_pixel(x, y).0, expected, "pixel ({x}, {y})");
+            }
             assert_eq!(
                 image.get_pixel((width - 1) as u32, (height - 1) as u32).0,
                 [255, 0, 0, 255]
@@ -1378,6 +1485,30 @@ struct PathSprite {
     bounds: Bounds<ScaledPixels>,
 }
 
+// These repr(C) sizes and field offsets must match the word loaders in HLSL.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<Quad>() == 160);
+    assert!(offset_of!(Quad, background) == 40);
+    assert!(offset_of!(Quad, border_widths) == 144);
+    assert!(size_of::<Shadow>() == 112);
+    assert!(offset_of!(Shadow, inset) == 104);
+    assert!(size_of::<Underline>() == 64);
+    assert!(offset_of!(Underline, wavy) == 60);
+    assert!(size_of::<MonochromeSprite>() == 112);
+    assert!(size_of::<SubpixelSprite>() == 112);
+    assert!(offset_of!(MonochromeSprite, transformation) == 88);
+    assert!(offset_of!(SubpixelSprite, transformation) == 88);
+    assert!(size_of::<PolychromeSprite>() == 96);
+    assert!(offset_of!(PolychromeSprite, tile) == 64);
+    assert!(size_of::<PathRasterizationSprite>() == 104);
+    assert!(offset_of!(PathRasterizationSprite, bounds) == 88);
+    assert!(size_of::<PathSprite>() == 16);
+    assert!(size_of::<Background>() == 72);
+    assert!(size_of::<AtlasTile>() == 32);
+    assert!(offset_of!(AtlasTile, bounds) == 16);
+};
+
 impl Drop for DirectXRenderer {
     fn drop(&mut self) {
         #[cfg(debug_assertions)]
@@ -1741,8 +1872,8 @@ fn create_buffer(
         Usage: D3D11_USAGE_DYNAMIC,
         BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
         CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
-        MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
-        StructureByteStride: element_size as u32,
+        MiscFlags: 0,
+        StructureByteStride: 0,
     };
     let mut buffer = None;
     unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer)) }?;
@@ -1755,7 +1886,21 @@ fn create_buffer_view(
     buffer: &ID3D11Buffer,
 ) -> Result<Option<ID3D11ShaderResourceView>> {
     let mut view = None;
-    unsafe { device.CreateShaderResourceView(buffer, None, Some(&mut view)) }?;
+    let mut buffer_desc = D3D11_BUFFER_DESC::default();
+    unsafe { buffer.GetDesc(&mut buffer_desc) };
+    let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+        Format: DXGI_FORMAT_R32_UINT,
+        ViewDimension: D3D_SRV_DIMENSION_BUFFER,
+        Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+            Buffer: D3D11_BUFFER_SRV {
+                Anonymous1: D3D11_BUFFER_SRV_0 { FirstElement: 0 },
+                Anonymous2: D3D11_BUFFER_SRV_1 {
+                    NumElements: buffer_desc.ByteWidth / 4,
+                },
+            },
+        },
+    };
+    unsafe { device.CreateShaderResourceView(buffer, Some(&desc), Some(&mut view)) }?;
     Ok(view)
 }
 

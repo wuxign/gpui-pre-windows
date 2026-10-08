@@ -8,9 +8,8 @@ use windows::Win32::{
             D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
         },
         Direct3D11::{
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
-            D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS,
-            D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
+            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
         },
         Dxgi::{
             CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice,
@@ -45,13 +44,23 @@ pub(crate) struct DirectXDevices {
 impl DirectXDevices {
     #[cfg(test)]
     pub(crate) fn software_for_test() -> Result<Self> {
-        let (adapter, device, device_context, _) = get_software_adapter(false)?;
+        // Force the original Win7 WARP feature level even on newer Windows.
+        let mut context = None;
+        let device = get_device_with_levels(
+            None,
+            Some(&mut context),
+            None,
+            false,
+            &[D3D_FEATURE_LEVEL_10_1],
+        )?;
+        let dxgi_device: IDXGIDevice = device.cast()?;
+        let adapter: IDXGIAdapter1 = unsafe { dxgi_device.GetAdapter() }?.cast()?;
         let dxgi_factory = unsafe { adapter.GetParent::<IDXGIFactory1>() }?;
         Ok(Self {
             adapter,
             dxgi_factory,
             device,
-            device_context,
+            device_context: context.context("WARP device returned no immediate context")?,
         })
     }
 
@@ -193,7 +202,7 @@ fn get_software_adapter(
     let mut context = None;
     let mut level = D3D_FEATURE_LEVEL::default();
     let device = get_device(None, Some(&mut context), Some(&mut level), debug)
-        .context("Creating WARP device with GPUI's required StructuredBuffer support")?;
+        .context("Creating WARP device at Direct3D feature level 10.1 or higher")?;
     let dxgi_device: IDXGIDevice = device.cast()?;
     let adapter = unsafe { dxgi_device.GetAdapter() }?.cast()?;
     Ok((
@@ -211,6 +220,32 @@ fn get_device(
     feature_level: Option<*mut D3D_FEATURE_LEVEL>,
     debug_layer_available: bool,
 ) -> Result<ID3D11Device> {
+    let legacy_levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1];
+    let modern_levels = [
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+    ];
+    get_device_with_levels(
+        adapter,
+        context,
+        feature_level,
+        debug_layer_available,
+        if crate::compat::legacy_mode() {
+            &legacy_levels
+        } else {
+            &modern_levels
+        },
+    )
+}
+
+fn get_device_with_levels(
+    adapter: Option<&IDXGIAdapter1>,
+    context: Option<*mut Option<ID3D11DeviceContext>>,
+    feature_level: Option<*mut D3D_FEATURE_LEVEL>,
+    debug_layer_available: bool,
+    levels: &[D3D_FEATURE_LEVEL],
+) -> Result<ID3D11Device> {
     let adapter = adapter
         .map(|adapter| adapter.cast::<IDXGIAdapter>())
         .transpose()?;
@@ -221,12 +256,6 @@ fn get_device(
         D3D11_CREATE_DEVICE_BGRA_SUPPORT
     };
     unsafe {
-        let legacy_levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1];
-        let modern_levels = [
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1,
-        ];
         D3D11CreateDevice(
             adapter.as_ref(),
             if adapter.is_some() {
@@ -237,36 +266,14 @@ fn get_device(
             HMODULE::default(),
             device_flags,
             // 4x MSAA is required for Direct3D Feature Level 10.1 or better
-            Some(if crate::compat::legacy_mode() {
-                &legacy_levels[..]
-            } else {
-                &modern_levels[..]
-            }),
+            Some(levels),
             D3D11_SDK_VERSION,
             Some(&mut device),
             feature_level,
             context,
         )?;
     }
-    let device = device.unwrap();
-    let mut data = D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS::default();
-    unsafe {
-        device
-            .CheckFeatureSupport(
-                D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS,
-                &mut data as *mut _ as _,
-                std::mem::size_of::<D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS>() as u32,
-            )
-            .context("Checking GPU device feature support")?;
-    }
-    if data
-        .ComputeShaders_Plus_RawAndStructuredBuffers_Via_Shader_4_x
-        .as_bool()
-    {
-        Ok(device)
-    } else {
-        Err(anyhow::anyhow!(
-            "Required feature StructuredBuffer is not supported by GPU/driver"
-        ))
-    }
+    // Instance data uses typed R32_UINT buffers, supported by feature level
+    // 10.1 without the optional compute/structured-buffer capability.
+    Ok(device.unwrap())
 }
