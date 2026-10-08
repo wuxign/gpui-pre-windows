@@ -35,7 +35,7 @@ struct FontInfo {
     font_collection: IDWriteFontCollection1,
 }
 
-pub(crate) struct DirectWriteTextSystem {
+pub(crate) struct ModernDirectWriteTextSystem {
     components: DirectWriteComponents,
     state: RwLock<DirectWriteState>,
 }
@@ -164,13 +164,13 @@ impl GPUState {
     }
 }
 
-impl DirectWriteTextSystem {
+impl ModernDirectWriteTextSystem {
     /// Creates the text system, able to rasterize color glyphs once it has `directx_devices`.
     pub(crate) fn new(directx_devices: Option<&DirectXDevices>) -> Result<Self> {
         let factory: IDWriteFactory5 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         // The `IDWriteInMemoryFontFileLoader` here is supported starting from
         // Windows 10 Creators Update, which consequently requires the entire
-        // `DirectWriteTextSystem` to run on `win10 1703`+.
+        // `ModernDirectWriteTextSystem` to run on `win10 1703`+.
         let in_memory_loader = unsafe { factory.CreateInMemoryFontFileLoader()? };
         unsafe { factory.RegisterFontFileLoader(&in_memory_loader)? };
         let builder = unsafe { factory.CreateFontSetBuilder()? };
@@ -233,7 +233,7 @@ impl DirectWriteTextSystem {
     }
 }
 
-impl PlatformTextSystem for DirectWriteTextSystem {
+impl PlatformTextSystem for ModernDirectWriteTextSystem {
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.state.write().add_fonts(&self.components, fonts)
     }
@@ -1962,7 +1962,7 @@ const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectWriteState, DirectWriteTextSystem, GPUState, GlyphLayerTexture};
+    use super::{DirectWriteState, ModernDirectWriteTextSystem, GPUState, GlyphLayerTexture};
     use crate::direct_write::ClusterAnalyzer;
     use crate::directx_devices::DirectXDevices;
     use anyhow::Result;
@@ -2017,7 +2017,7 @@ mod tests {
     #[test]
     fn color_emoji_rasterization_is_stable_across_batches() -> Result<()> {
         let devices = DirectXDevices::new()?;
-        let text_system = DirectWriteTextSystem::new(Some(&devices))?;
+        let text_system = ModernDirectWriteTextSystem::new(Some(&devices))?;
 
         let font = Font {
             family: "Segoe UI Emoji".into(),

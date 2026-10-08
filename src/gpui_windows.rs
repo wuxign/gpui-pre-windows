@@ -6,6 +6,9 @@ mod destination_list;
 mod dialog;
 mod direct_manipulation;
 mod direct_write;
+mod legacy_direct_write;
+mod legacy_fonts;
+mod text_system;
 mod directx_atlas;
 mod directx_devices;
 mod directx_renderer;
@@ -23,7 +26,7 @@ mod wrapper;
 
 pub(crate) use clipboard::*;
 pub(crate) use destination_list::*;
-pub(crate) use direct_write::*;
+pub(crate) use text_system::*;
 pub(crate) use directx_atlas::*;
 pub(crate) use directx_devices::*;
 pub(crate) use directx_renderer::*;
