@@ -4,14 +4,7 @@ use smallvec::SmallVec;
 use std::rc::Rc;
 use uuid::Uuid;
 use windows::{
-    Win32::{
-        Foundation::*,
-        Graphics::Gdi::*,
-        UI::{
-            HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
-            WindowsAndMessaging::USER_DEFAULT_SCREEN_DPI,
-        },
-    },
+    Win32::{Foundation::*, Graphics::Gdi::*},
     core::*,
 };
 
@@ -202,9 +195,5 @@ fn generate_uuid(device_name: &[u16]) -> Uuid {
 }
 
 fn get_scale_factor_for_monitor(monitor: HMONITOR) -> Result<f32> {
-    let mut dpi_x = 0;
-    let mut dpi_y = 0;
-    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }?;
-    assert_eq!(dpi_x, dpi_y);
-    Ok(dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32)
+    Ok(crate::compat::monitor_scale(monitor))
 }

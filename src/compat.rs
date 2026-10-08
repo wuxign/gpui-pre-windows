@@ -1,4 +1,4 @@
-//! Resolve optional graphics APIs without startup imports.
+//! Resolve optional Windows APIs without importing absent DLLs at startup.
 use std::{
     ffi::{CStr, c_void},
     sync::OnceLock,
@@ -6,8 +6,9 @@ use std::{
 use windows::{
     Win32::{
         Foundation::*,
-        Graphics::{DirectComposition::*, Dxgi::IDXGIDevice},
+        Graphics::{DirectComposition::*, Dxgi::IDXGIDevice, Gdi::*},
         System::{LibraryLoader::*, SystemInformation::GetSystemDirectoryW},
+        UI::{HiDpi::*, WindowsAndMessaging::*},
     },
     core::*,
 };
@@ -47,6 +48,67 @@ pub(crate) fn system_proc(
         let _ = unsafe { windows::Win32::Foundation::FreeLibrary(module) };
     }
     function
+}
+
+fn system_dpi() -> u32 {
+    unsafe {
+        let dc = GetDC(None);
+        if dc.is_invalid() {
+            return 96;
+        }
+        let dpi = GetDeviceCaps(Some(dc), LOGPIXELSX);
+        ReleaseDC(None, dc);
+        if dpi > 0 { dpi as u32 } else { 96 }
+    }
+}
+
+pub(crate) fn window_dpi(hwnd: HWND) -> u32 {
+    type Function = unsafe extern "system" fn(HWND) -> u32;
+    static FUNCTION: OnceLock<Option<Function>> = OnceLock::new();
+    if !legacy_mode() {
+        if let Some(function) = FUNCTION.get_or_init(|| {
+            system_proc("user32.dll", c"GetDpiForWindow").map(|p| unsafe { std::mem::transmute(p) })
+        }) {
+            let dpi = unsafe { function(hwnd) };
+            if dpi > 0 {
+                return dpi;
+            }
+        }
+    }
+    system_dpi()
+}
+
+pub(crate) fn monitor_scale(monitor: HMONITOR) -> f32 {
+    type Function =
+        unsafe extern "system" fn(HMONITOR, MONITOR_DPI_TYPE, *mut u32, *mut u32) -> HRESULT;
+    static FUNCTION: OnceLock<Option<Function>> = OnceLock::new();
+    if !legacy_mode() {
+        if let Some(function) = FUNCTION.get_or_init(|| {
+            system_proc("shcore.dll", c"GetDpiForMonitor")
+                .map(|p| unsafe { std::mem::transmute(p) })
+        }) {
+            let (mut x, mut y) = (0, 0);
+            if unsafe { function(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) }.is_ok() && x > 0 {
+                return x as f32 / 96.;
+            }
+        }
+    }
+    system_dpi() as f32 / 96.
+}
+
+pub(crate) fn metrics_for_dpi(index: SYSTEM_METRICS_INDEX, dpi: u32) -> i32 {
+    type Function = unsafe extern "system" fn(SYSTEM_METRICS_INDEX, u32) -> i32;
+    static FUNCTION: OnceLock<Option<Function>> = OnceLock::new();
+    if !legacy_mode() {
+        if let Some(function) = FUNCTION.get_or_init(|| {
+            system_proc("user32.dll", c"GetSystemMetricsForDpi")
+                .map(|p| unsafe { std::mem::transmute(p) })
+        }) {
+            return unsafe { function(index, dpi) };
+        }
+    }
+    // GetSystemMetrics is already expressed in system-DPI pixels on Win7.
+    unsafe { GetSystemMetrics(index) }
 }
 
 pub(crate) fn composition_device(device: &IDXGIDevice) -> Result<IDCompositionDevice> {
