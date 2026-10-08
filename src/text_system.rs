@@ -1,5 +1,5 @@
 use crate::{
-    DirectXDevices, direct_write::ModernDirectWriteTextSystem,
+    DirectXDevices, direct_write::DirectWriteTextSystem as ModernDirectWriteTextSystem,
     legacy_direct_write::LegacyDirectWriteTextSystem,
 };
 use anyhow::Result;
