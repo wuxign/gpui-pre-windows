@@ -33,7 +33,10 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 mod legacy_graphics_tests {
     use super::{DXGI_SWAP_EFFECT_DISCARD, DirectXRenderer};
     use crate::DirectXDevices;
-    use gpui::{DevicePixels, Scene, WindowBackgroundAppearance, size};
+    use gpui::{
+        Bounds, ContentMask, DevicePixels, Quad, ScaledPixels, Scene, WindowBackgroundAppearance,
+        point, rgb, size,
+    };
     use windows::{Win32::UI::WindowsAndMessaging::*, core::w};
 
     #[test]
@@ -68,29 +71,40 @@ mod legacy_graphics_tests {
         let _window = Window(hwnd);
         let devices = DirectXDevices::new().unwrap();
         let mut renderer = DirectXRenderer::new(hwnd, &devices, true).unwrap();
-        let (width, height) = (64, 48);
-        renderer
-            .resize(size(DevicePixels(width), DevicePixels(height)))
-            .unwrap();
-        let description =
-            unsafe { renderer.resources.as_ref().unwrap().swap_chain.GetDesc() }.unwrap();
-        assert_eq!(description.SwapEffect, DXGI_SWAP_EFFECT_DISCARD);
-        assert_eq!(
-            (description.BufferDesc.Width, description.BufferDesc.Height),
-            (width as u32, height as u32)
-        );
-        let scene = Scene::default();
-        renderer
-            .draw(&scene, WindowBackgroundAppearance::Opaque)
-            .unwrap();
-        let image = renderer
-            .render_to_image(&scene, WindowBackgroundAppearance::Opaque)
-            .unwrap();
-        assert_eq!(image.dimensions(), (width as u32, height as u32));
-        assert_eq!(
-            image.get_pixel((width - 1) as u32, (height - 1) as u32).0,
-            [255, 255, 255, 255]
-        );
+        for (width, height) in [(64, 48), (96, 72), (48, 36), (128, 96), (64, 48)] {
+            renderer
+                .resize(size(DevicePixels(width), DevicePixels(height)))
+                .unwrap();
+            let description =
+                unsafe { renderer.resources.as_ref().unwrap().swap_chain.GetDesc() }.unwrap();
+            assert_eq!(description.SwapEffect, DXGI_SWAP_EFFECT_DISCARD);
+            assert_eq!(
+                (description.BufferDesc.Width, description.BufferDesc.Height),
+                (width as u32, height as u32)
+            );
+            let bounds = Bounds::new(
+                point(ScaledPixels(0.), ScaledPixels(0.)),
+                size(ScaledPixels(width as f32), ScaledPixels(height as f32)),
+            );
+            let mut scene = Scene::default();
+            scene.insert_primitive(Quad {
+                bounds,
+                content_mask: ContentMask { bounds },
+                background: rgb(0xff0000).into(),
+                ..Default::default()
+            });
+            renderer
+                .draw(&scene, WindowBackgroundAppearance::Opaque)
+                .unwrap();
+            let image = renderer
+                .render_to_image(&scene, WindowBackgroundAppearance::Opaque)
+                .unwrap();
+            assert_eq!(image.dimensions(), (width as u32, height as u32));
+            assert_eq!(
+                image.get_pixel((width - 1) as u32, (height - 1) as u32).0,
+                [255, 0, 0, 255]
+            );
+        }
     }
 }
 
