@@ -19,52 +19,6 @@ use crate::*;
 const DEFAULT_VIEWPORT_SIZE: i32 = 1000;
 
 pub(crate) struct DirectManipulationHandler {
-    active: Option<ActiveDirectManipulationHandler>,
-}
-
-impl DirectManipulationHandler {
-    pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
-        // Direct Manipulation is an optional gesture service, absent on Win7.
-        // Mouse wheel input is handled separately by the window message loop.
-        if crate::compat::legacy_mode() {
-            return Ok(Self { active: None });
-        }
-        let active = match ActiveDirectManipulationHandler::new(window, scale_factor) {
-            Ok(handler) => Some(handler),
-            Err(error) => {
-                log::warn!("Direct Manipulation unavailable; gestures disabled: {error:#}");
-                None
-            }
-        };
-        Ok(Self { active })
-    }
-
-    pub fn set_scale_factor(&self, scale_factor: f32) {
-        if let Some(active) = &self.active {
-            active.set_scale_factor(scale_factor);
-        }
-    }
-
-    pub fn on_pointer_hit_test(&self, wparam: WPARAM) {
-        if let Some(active) = &self.active {
-            active.on_pointer_hit_test(wparam);
-        }
-    }
-
-    pub fn update(&self) {
-        if let Some(active) = &self.active {
-            active.update();
-        }
-    }
-
-    pub fn drain_events(&self) -> Vec<PlatformInput> {
-        self.active
-            .as_ref()
-            .map_or_else(Vec::new, |active| active.drain_events())
-    }
-}
-
-struct ActiveDirectManipulationHandler {
     manager: IDirectManipulationManager,
     update_manager: IDirectManipulationUpdateManager,
     viewport: IDirectManipulationViewport,
@@ -74,26 +28,7 @@ struct ActiveDirectManipulationHandler {
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
 }
 
-#[cfg(test)]
-mod legacy_tests {
-    use super::DirectManipulationHandler;
-    use windows::Win32::Foundation::{HWND, WPARAM};
-
-    #[test]
-    fn legacy_gestures_are_optional_without_a_com_class_or_window() {
-        if !crate::compat::legacy_mode() {
-            return;
-        }
-        let handler = DirectManipulationHandler::new(HWND::default(), 1.).unwrap();
-        assert!(handler.active.is_none());
-        handler.set_scale_factor(1.5);
-        handler.on_pointer_hit_test(WPARAM(0));
-        handler.update();
-        assert!(handler.drain_events().is_empty());
-    }
-}
-
-impl ActiveDirectManipulationHandler {
+impl DirectManipulationHandler {
     pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
         unsafe {
             let manager: IDirectManipulationManager =
@@ -181,7 +116,7 @@ impl ActiveDirectManipulationHandler {
     }
 }
 
-impl Drop for ActiveDirectManipulationHandler {
+impl Drop for DirectManipulationHandler {
     fn drop(&mut self) {
         unsafe {
             self.viewport.Stop().log_err();

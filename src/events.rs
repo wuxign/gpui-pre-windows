@@ -9,6 +9,7 @@ use windows::{
         System::SystemServices::*,
         UI::{
             Controls::*,
+            HiDpi::*,
             Input::{Ime::*, KeyboardAndMouse::*},
             WindowsAndMessaging::*,
         },
@@ -105,9 +106,6 @@ impl WindowsWindowInner {
             WM_DISPLAYCHANGE => self.handle_display_change_msg(handle),
             WM_NCHITTEST => self.handle_hit_test_msg(handle, lparam),
             WM_PAINT => self.handle_paint_msg(handle),
-            // The legacy swap chain paints the whole client area itself. Erasing
-            // it with the window's black brush exposes a flash during live resize.
-            WM_ERASEBKGND if crate::compat::legacy_mode() => Some(1),
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
@@ -260,13 +258,11 @@ impl WindowsWindowInner {
         should_resize_renderer: bool,
     ) {
         let new_logical_size = device_size.to_pixels(scale_factor);
-        let mut resize_succeeded = true;
 
         self.state.logical_size.set(new_logical_size);
         if should_resize_renderer
             && let Err(e) = self.state.renderer.borrow_mut().resize(device_size)
         {
-            resize_succeeded = false;
             log::error!("Failed to resize renderer, invalidating devices: {}", e);
             self.state
                 .invalidate_devices
@@ -275,17 +271,6 @@ impl WindowsWindowInner {
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
             self.state.callbacks.resize.set(Some(callback));
-        }
-        if crate::compat::legacy_mode() && resize_succeeded {
-            // ResizeBuffers discards the previous contents. A normal frame can
-            // be skipped by GPUI's dirty check, leaving the resized buffer black.
-            // Update layout first, then force a complete frame before WM_SIZE
-            // returns, even inside Windows' modal sizing loop. If drawing is
-            // re-entrant, draw_window preserves this flag for the next paint.
-            self.state.force_render_pending.set(true);
-            let handle = self.platform_window_handle;
-            unsafe { InvalidateRect(Some(handle), None, false).ok().log_err() };
-            self.draw_window(handle, false);
         }
     }
 
@@ -792,7 +777,7 @@ impl WindowsWindowInner {
             let result = DefWindowProcW(handle, WM_NCCALCSIZE, wparam, lparam);
             (*params).rgrc[0].top = saved_top;
             if self.state.is_maximized() {
-                let dpi = crate::compat::window_dpi(handle);
+                let dpi = GetDpiForWindow(handle);
                 (*params).rgrc[0].top += get_frame_thicknessx(dpi);
             }
             Some(result.0 as isize)
@@ -999,7 +984,7 @@ impl WindowsWindowInner {
             return drag_area;
         }
 
-        let dpi = crate::compat::window_dpi(handle);
+        let dpi = unsafe { GetDpiForWindow(handle) };
         // We do not use the OS title bar, so the default `DefWindowProcW` will only register a 1px edge for resizes
         // We need to calculate the frame thickness ourselves and do the hit test manually.
         let frame_y = get_frame_thicknessx(dpi);
@@ -1805,14 +1790,14 @@ pub(crate) fn current_capslock() -> Capslock {
 // - SM_CXSIZEFRAME: The resize handle.
 // - SM_CXPADDEDBORDER: Additional border space that isn't part of the resize handle.
 fn get_frame_thicknessx(dpi: u32) -> i32 {
-    let resize_frame_thickness = crate::compat::metrics_for_dpi(SM_CXSIZEFRAME, dpi);
-    let padding_thickness = crate::compat::metrics_for_dpi(SM_CXPADDEDBORDER, dpi);
+    let resize_frame_thickness = unsafe { GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) };
+    let padding_thickness = unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };
     resize_frame_thickness + padding_thickness
 }
 
 fn get_frame_thicknessy(dpi: u32) -> i32 {
-    let resize_frame_thickness = crate::compat::metrics_for_dpi(SM_CYSIZEFRAME, dpi);
-    let padding_thickness = crate::compat::metrics_for_dpi(SM_CXPADDEDBORDER, dpi);
+    let resize_frame_thickness = unsafe { GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) };
+    let padding_thickness = unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };
     resize_frame_thickness + padding_thickness
 }
 

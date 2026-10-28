@@ -29,10 +29,6 @@ const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
-#[cfg(test)]
-#[path = "directx_renderer/legacy_tests.rs"]
-mod legacy_graphics_tests;
-
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
     pub grayscale_enhanced_contrast: f32,
@@ -64,7 +60,7 @@ pub(crate) struct DirectXRenderer {
 #[derive(Clone)]
 pub(crate) struct DirectXRendererDevices {
     pub(crate) adapter: IDXGIAdapter1,
-    pub(crate) dxgi_factory: IDXGIFactory1,
+    pub(crate) dxgi_factory: IDXGIFactory6,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
     dxgi_device: Option<IDXGIDevice>,
@@ -73,7 +69,7 @@ pub(crate) struct DirectXRendererDevices {
 
 struct DirectXResources {
     // Direct3D rendering objects
-    swap_chain: IDXGISwapChain,
+    swap_chain: IDXGISwapChain1,
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
@@ -856,7 +852,17 @@ impl DirectXRenderer {
 
     pub(crate) fn get_font_info() -> &'static FontInfo {
         static CACHED_FONT_INFO: OnceLock<FontInfo> = OnceLock::new();
-        CACHED_FONT_INFO.get_or_init(graphics_compat::font_info)
+        CACHED_FONT_INFO.get_or_init(|| unsafe {
+            let factory: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
+            let render_params: IDWriteRenderingParams1 =
+                factory.CreateRenderingParams().unwrap().cast().unwrap();
+            FontInfo {
+                gamma_ratios: gpui::get_gamma_correction_ratios(render_params.GetGamma()),
+                grayscale_enhanced_contrast: render_params.GetGrayscaleEnhancedContrast(),
+                subpixel_enhanced_contrast: render_params.GetEnhancedContrast(),
+                is_bgr: render_params.GetPixelGeometry() == DWRITE_PIXEL_GEOMETRY_BGR,
+            }
+        })
     }
 
     pub(crate) fn mark_drawable(&mut self) {
@@ -1018,7 +1024,7 @@ impl DirectComposition {
         })
     }
 
-    pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain) -> Result<()> {
+    pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {
         unsafe {
             self.comp_visual.SetContent(swap_chain)?;
             self.comp_target.SetRoot(&self.comp_visual)?;
@@ -1275,10 +1281,6 @@ struct PathSprite {
     bounds: Bounds<ScaledPixels>,
 }
 
-#[path = "directx_renderer/compat.rs"]
-mod graphics_compat;
-use graphics_compat::{create_buffer, create_buffer_view};
-
 impl Drop for DirectXRenderer {
     fn drop(&mut self) {
         #[cfg(debug_assertions)]
@@ -1290,15 +1292,15 @@ impl Drop for DirectXRenderer {
 
 #[inline]
 fn get_comp_device(dxgi_device: &IDXGIDevice) -> Result<IDCompositionDevice> {
-    Ok(crate::compat::composition_device(dxgi_device)?)
+    Ok(unsafe { DCompositionCreateDevice(dxgi_device)? })
 }
 
 fn create_swap_chain_for_composition(
-    dxgi_factory: &IDXGIFactory1,
+    dxgi_factory: &IDXGIFactory6,
     device: &ID3D11Device,
     width: u32,
     height: u32,
-) -> Result<IDXGISwapChain> {
+) -> Result<IDXGISwapChain1> {
     let desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
         Height: height,
@@ -1316,17 +1318,16 @@ fn create_swap_chain_for_composition(
         AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
         Flags: 0,
     };
-    let factory: IDXGIFactory2 = dxgi_factory.cast()?;
-    Ok(unsafe { factory.CreateSwapChainForComposition(device, &desc, None)? }.cast()?)
+    Ok(unsafe { dxgi_factory.CreateSwapChainForComposition(device, &desc, None)? })
 }
 
 fn create_swap_chain(
-    dxgi_factory: &IDXGIFactory1,
+    dxgi_factory: &IDXGIFactory6,
     device: &ID3D11Device,
     hwnd: HWND,
     width: u32,
     height: u32,
-) -> Result<IDXGISwapChain> {
+) -> Result<IDXGISwapChain1> {
     use windows::Win32::Graphics::Dxgi::DXGI_MWA_NO_ALT_ENTER;
 
     let desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -1345,12 +1346,8 @@ fn create_swap_chain(
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
         Flags: 0,
     };
-    let swap_chain: IDXGISwapChain = if crate::compat::legacy_mode() {
-        graphics_compat::create_legacy_swap_chain(dxgi_factory, device, hwnd, width, height)?
-    } else {
-        let factory: IDXGIFactory2 = dxgi_factory.cast()?;
-        unsafe { factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None)? }.cast()?
-    };
+    let swap_chain =
+        unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) }?;
     unsafe { dxgi_factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER) }?;
     Ok(swap_chain)
 }
@@ -1358,7 +1355,7 @@ fn create_swap_chain(
 #[inline]
 fn create_resources(
     devices: &DirectXRendererDevices,
-    swap_chain: &IDXGISwapChain,
+    swap_chain: &IDXGISwapChain1,
     width: u32,
     height: u32,
 ) -> Result<(
@@ -1397,7 +1394,7 @@ fn create_resources(
 
 #[inline]
 fn create_render_target_and_its_view(
-    swap_chain: &IDXGISwapChain,
+    swap_chain: &IDXGISwapChain1,
     device: &ID3D11Device,
 ) -> Result<(ID3D11Texture2D, Option<ID3D11RenderTargetView>)> {
     let render_target: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0) }?;
@@ -1605,6 +1602,35 @@ fn create_constant_buffer<T>(device: &ID3D11Device) -> Result<Option<ID3D11Buffe
     let mut buffer = None;
     unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer)) }?;
     Ok(buffer)
+}
+
+#[inline]
+fn create_buffer(
+    device: &ID3D11Device,
+    element_size: usize,
+    buffer_size: usize,
+) -> Result<ID3D11Buffer> {
+    let desc = D3D11_BUFFER_DESC {
+        ByteWidth: (element_size * buffer_size) as u32,
+        Usage: D3D11_USAGE_DYNAMIC,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+        MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
+        StructureByteStride: element_size as u32,
+    };
+    let mut buffer = None;
+    unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer)) }?;
+    Ok(buffer.unwrap())
+}
+
+#[inline]
+fn create_buffer_view(
+    device: &ID3D11Device,
+    buffer: &ID3D11Buffer,
+) -> Result<Option<ID3D11ShaderResourceView>> {
+    let mut view = None;
+    unsafe { device.CreateShaderResourceView(buffer, None, Some(&mut view)) }?;
+    Ok(view)
 }
 
 #[inline]

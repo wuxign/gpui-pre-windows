@@ -23,7 +23,7 @@ use windows::{
         System::{
             Com::*, Diagnostics::Debug::MessageBeep, LibraryLoader::*, Ole::*, SystemServices::*,
         },
-        UI::{Controls::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
+        UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
 };
@@ -125,7 +125,7 @@ impl WindowsWindowState {
         draw_coordinator: Rc<DrawCoordinator>,
     ) -> Result<Self> {
         let scale_factor = {
-            let monitor_dpi = crate::compat::window_dpi(hwnd) as f32;
+            let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
             monitor_dpi / USER_DEFAULT_SCREEN_DPI as f32
         };
         let origin = logical_point(window_params.x as f32, window_params.y as f32, scale_factor);
@@ -1041,7 +1041,7 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         self.state
             .renderer

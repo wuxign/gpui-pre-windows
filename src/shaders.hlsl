@@ -528,14 +528,12 @@ struct QuadFragmentInput {
     nointerpolation float4 background_color1: COLOR3;
 };
 
-#define GPUI_BUFFER_QUADS
-#include "legacy_buffers.hlsl"
-#undef GPUI_BUFFER_QUADS
+StructuredBuffer<Quad> quads: register(t1);
 
 QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     uint quad_id = batch_start_index + instance_id;
-    Quad quad = read_quads(quad_id);
+    Quad quad = quads[quad_id];
     float4 device_position = to_device_position(unit_vertex, quad.bounds);
 
     GradientColor gradient = prepare_gradient_color(
@@ -559,7 +557,7 @@ QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_I
 }
 
 float4 quad_fragment(QuadFragmentInput input): SV_Target {
-    Quad quad = read_quads(input.quad_id);
+    Quad quad = quads[input.quad_id];
     float4 background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
 
@@ -881,14 +879,12 @@ struct ShadowFragmentInput {
   nointerpolation float4 color: COLOR;
 };
 
-#define GPUI_BUFFER_SHADOWS
-#include "legacy_buffers.hlsl"
-#undef GPUI_BUFFER_SHADOWS
+StructuredBuffer<Shadow> shadows: register(t1);
 
 ShadowVertexOutput shadow_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     uint shadow_id = batch_start_index + instance_id;
-    Shadow shadow = read_shadows(shadow_id);
+    Shadow shadow = shadows[shadow_id];
 
     Bounds bounds;
     if (shadow.inset != 0u) {
@@ -915,7 +911,7 @@ ShadowVertexOutput shadow_vertex(uint vertex_id: SV_VertexID, uint instance_id: 
 }
 
 float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
-    Shadow shadow = read_shadows(input.shadow_id);
+    Shadow shadow = shadows[input.shadow_id];
 
     float2 half_size = shadow.bounds.size / 2.;
     float2 center = shadow.bounds.origin + half_size;
@@ -970,9 +966,7 @@ struct PathRasterizationSprite {
     Bounds bounds;
 };
 
-#define GPUI_BUFFER_PATH_RASTERIZATION_SPRITES
-#include "legacy_buffers.hlsl"
-#undef GPUI_BUFFER_PATH_RASTERIZATION_SPRITES
+StructuredBuffer<PathRasterizationSprite> path_rasterization_sprites: register(t1);
 
 struct PathVertexOutput {
     float4 position: SV_Position;
@@ -988,7 +982,7 @@ struct PathFragmentInput {
 };
 
 PathVertexOutput path_rasterization_vertex(uint vertex_id: SV_VertexID) {
-    PathRasterizationSprite sprite = read_path_rasterization_sprites(vertex_id);
+    PathRasterizationSprite sprite = path_rasterization_sprites[vertex_id];
 
     PathVertexOutput output;
     output.position = to_device_position_impl(sprite.xy_position);
@@ -1002,7 +996,7 @@ PathVertexOutput path_rasterization_vertex(uint vertex_id: SV_VertexID) {
 float4 path_rasterization_fragment(PathFragmentInput input): SV_Target {
     float2 dx = ddx(input.st_position);
     float2 dy = ddy(input.st_position);
-    PathRasterizationSprite sprite = read_path_rasterization_sprites(input.vertex_id);
+    PathRasterizationSprite sprite = path_rasterization_sprites[input.vertex_id];
 
     Background background = sprite.color;
     Bounds bounds = sprite.bounds;
@@ -1040,13 +1034,11 @@ struct PathSpriteVertexOutput {
     float2 texture_coords: TEXCOORD0;
 };
 
-#define GPUI_BUFFER_PATH_SPRITES
-#include "legacy_buffers.hlsl"
-#undef GPUI_BUFFER_PATH_SPRITES
+StructuredBuffer<PathSprite> path_sprites: register(t1);
 
 PathSpriteVertexOutput path_sprite_vertex(uint vertex_id: SV_VertexID, uint sprite_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
-    PathSprite sprite = read_path_sprites(sprite_id);
+    PathSprite sprite = path_sprites[sprite_id];
 
     // Don't apply content mask because it was already accounted for when rasterizing the path
     float4 device_position = to_device_position(unit_vertex, sprite.bounds);
@@ -1093,14 +1085,12 @@ struct UnderlineFragmentInput {
   nointerpolation float4 color: COLOR;
 };
 
-#define GPUI_BUFFER_UNDERLINES
-#include "legacy_buffers.hlsl"
-#undef GPUI_BUFFER_UNDERLINES
+StructuredBuffer<Underline> underlines: register(t1);
 
 UnderlineVertexOutput underline_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     uint underline_id = batch_start_index + instance_id;
-    Underline underline = read_underlines(underline_id);
+    Underline underline = underlines[underline_id];
     float4 device_position = to_device_position(unit_vertex, underline.bounds);
     float4 clip_distance = distance_from_clip_rect(unit_vertex, underline.bounds,
                                                     underline.content_mask);
@@ -1118,7 +1108,7 @@ float4 underline_fragment(UnderlineFragmentInput input): SV_Target {
     const float WAVE_FREQUENCY = 2.0;
     const float WAVE_HEIGHT_RATIO = 0.8;
 
-    Underline underline = read_underlines(input.underline_id);
+    Underline underline = underlines[input.underline_id];
     if (underline.wavy) {
         float half_thickness = underline.thickness * 0.5;
         float2 origin = underline.bounds.origin;
@@ -1171,14 +1161,12 @@ struct MonochromeSpriteFragmentInput {
     float4 clip_distance: SV_ClipDistance;
 };
 
-#define GPUI_BUFFER_MONO_SPRITES
-#include "legacy_buffers.hlsl"
-#undef GPUI_BUFFER_MONO_SPRITES
+StructuredBuffer<MonochromeSprite> mono_sprites: register(t1);
 
 MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     uint sprite_id = batch_start_index + instance_id;
-    MonochromeSprite sprite = read_mono_sprites(sprite_id);
+    MonochromeSprite sprite = mono_sprites[sprite_id];
     float4 device_position =
         to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
     float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
@@ -1246,14 +1234,12 @@ struct PolychromeSpriteFragmentInput {
     float2 tile_position: POSITION;
 };
 
-#define GPUI_BUFFER_POLY_SPRITES
-#include "legacy_buffers.hlsl"
-#undef GPUI_BUFFER_POLY_SPRITES
+StructuredBuffer<PolychromeSprite> poly_sprites: register(t1);
 
 PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     uint sprite_id = batch_start_index + instance_id;
-    PolychromeSprite sprite = read_poly_sprites(sprite_id);
+    PolychromeSprite sprite = poly_sprites[sprite_id];
     float4 device_position = to_device_position(unit_vertex, sprite.bounds);
     float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
                                                     sprite.content_mask);
@@ -1268,7 +1254,7 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
 }
 
 float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
-    PolychromeSprite sprite = read_poly_sprites(input.sprite_id);
+    PolychromeSprite sprite = poly_sprites[input.sprite_id];
     float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
     float distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
