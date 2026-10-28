@@ -2,15 +2,10 @@
 
 mod clipboard;
 mod compat;
-#[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
-mod legacy_com_imports;
 mod destination_list;
 mod dialog;
 mod direct_manipulation;
 mod direct_write;
-mod legacy_direct_write;
-mod legacy_fonts;
-mod text_system;
 mod directx_atlas;
 mod directx_devices;
 mod directx_renderer;
@@ -18,9 +13,14 @@ mod dispatcher;
 mod display;
 mod events;
 mod keyboard;
+#[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
+mod legacy_com_imports;
+mod legacy_direct_write;
+mod legacy_fonts;
 mod platform;
 mod system_notifications;
 mod system_settings;
+mod text_system;
 mod util;
 mod vsync;
 mod window;
@@ -28,7 +28,6 @@ mod wrapper;
 
 pub(crate) use clipboard::*;
 pub(crate) use destination_list::*;
-pub(crate) use text_system::*;
 pub(crate) use directx_atlas::*;
 pub(crate) use directx_devices::*;
 pub(crate) use directx_renderer::*;
@@ -39,6 +38,7 @@ pub(crate) use keyboard::*;
 pub(crate) use platform::*;
 pub(crate) use system_notifications::*;
 pub(crate) use system_settings::*;
+pub(crate) use text_system::*;
 pub(crate) use util::*;
 pub(crate) use vsync::*;
 pub(crate) use window::*;

@@ -1962,7 +1962,7 @@ const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectWriteState, ModernDirectWriteTextSystem, GPUState, GlyphLayerTexture};
+    use super::{DirectWriteState, GPUState, GlyphLayerTexture, ModernDirectWriteTextSystem};
     use crate::direct_write::ClusterAnalyzer;
     use crate::directx_devices::DirectXDevices;
     use anyhow::Result;
