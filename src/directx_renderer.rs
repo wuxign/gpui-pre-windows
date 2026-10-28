@@ -30,83 +30,8 @@ const PATH_MULTISAMPLE_COUNT: u32 = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
 #[cfg(test)]
-mod legacy_graphics_tests {
-    use super::{DXGI_SWAP_EFFECT_DISCARD, DirectXRenderer};
-    use crate::DirectXDevices;
-    use gpui::{
-        Bounds, ContentMask, DevicePixels, Quad, ScaledPixels, Scene, WindowBackgroundAppearance,
-        point, rgb, size,
-    };
-    use windows::{Win32::UI::WindowsAndMessaging::*, core::w};
-
-    #[test]
-    fn legacy_graphics_draws_and_resizes_discard_swap_chain() {
-        // Run with GPUI_WIN7_COMPAT=1 so this also exercises the old path on modern Windows.
-        if !crate::compat::legacy_mode() {
-            return;
-        }
-        let hwnd = unsafe {
-            CreateWindowExW(
-                Default::default(),
-                w!("STATIC"),
-                w!("GPUI graphics test"),
-                WS_OVERLAPPEDWINDOW,
-                0,
-                0,
-                128,
-                128,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap()
-        };
-        struct Window(windows::Win32::Foundation::HWND);
-        impl Drop for Window {
-            fn drop(&mut self) {
-                let _ = unsafe { DestroyWindow(self.0) };
-            }
-        }
-        let _window = Window(hwnd);
-        let devices = DirectXDevices::new().unwrap();
-        let mut renderer = DirectXRenderer::new(hwnd, &devices, true).unwrap();
-        for (width, height) in [(64, 48), (96, 72), (48, 36), (128, 96), (64, 48)] {
-            renderer
-                .resize(size(DevicePixels(width), DevicePixels(height)))
-                .unwrap();
-            let description =
-                unsafe { renderer.resources.as_ref().unwrap().swap_chain.GetDesc() }.unwrap();
-            assert_eq!(description.SwapEffect, DXGI_SWAP_EFFECT_DISCARD);
-            assert_eq!(
-                (description.BufferDesc.Width, description.BufferDesc.Height),
-                (width as u32, height as u32)
-            );
-            let bounds = Bounds::new(
-                point(ScaledPixels(0.), ScaledPixels(0.)),
-                size(ScaledPixels(width as f32), ScaledPixels(height as f32)),
-            );
-            let mut scene = Scene::default();
-            scene.insert_primitive(Quad {
-                bounds,
-                content_mask: ContentMask { bounds },
-                background: rgb(0xff0000).into(),
-                ..Default::default()
-            });
-            renderer
-                .draw(&scene, WindowBackgroundAppearance::Opaque)
-                .unwrap();
-            let image = renderer
-                .render_to_image(&scene, WindowBackgroundAppearance::Opaque)
-                .unwrap();
-            assert_eq!(image.dimensions(), (width as u32, height as u32));
-            assert_eq!(
-                image.get_pixel((width - 1) as u32, (height - 1) as u32).0,
-                [255, 0, 0, 255]
-            );
-        }
-    }
-}
+#[path = "directx_renderer/legacy_tests.rs"]
+mod legacy_graphics_tests;
 
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
@@ -931,24 +856,7 @@ impl DirectXRenderer {
 
     pub(crate) fn get_font_info() -> &'static FontInfo {
         static CACHED_FONT_INFO: OnceLock<FontInfo> = OnceLock::new();
-        CACHED_FONT_INFO.get_or_init(|| unsafe {
-            let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
-                .expect("DirectWrite factory unavailable");
-            let render_params = factory
-                .CreateRenderingParams()
-                .expect("DirectWrite rendering parameters unavailable");
-            let grayscale_contrast = render_params
-                .cast::<IDWriteRenderingParams1>()
-                .ok()
-                .map(|params| params.GetGrayscaleEnhancedContrast())
-                .unwrap_or_else(|| render_params.GetEnhancedContrast());
-            FontInfo {
-                gamma_ratios: gpui::get_gamma_correction_ratios(render_params.GetGamma()),
-                grayscale_enhanced_contrast: grayscale_contrast,
-                subpixel_enhanced_contrast: render_params.GetEnhancedContrast(),
-                is_bgr: render_params.GetPixelGeometry() == DWRITE_PIXEL_GEOMETRY_BGR,
-            }
-        })
+        CACHED_FONT_INFO.get_or_init(graphics_compat::font_info)
     }
 
     pub(crate) fn mark_drawable(&mut self) {
@@ -1367,6 +1275,10 @@ struct PathSprite {
     bounds: Bounds<ScaledPixels>,
 }
 
+#[path = "directx_renderer/compat.rs"]
+mod graphics_compat;
+use graphics_compat::{create_buffer, create_buffer_view};
+
 impl Drop for DirectXRenderer {
     fn drop(&mut self) {
         #[cfg(debug_assertions)]
@@ -1434,31 +1346,7 @@ fn create_swap_chain(
         Flags: 0,
     };
     let swap_chain: IDXGISwapChain = if crate::compat::legacy_mode() {
-        let legacy_desc = DXGI_SWAP_CHAIN_DESC {
-            BufferDesc: DXGI_MODE_DESC {
-                Width: width,
-                Height: height,
-                Format: RENDER_TARGET_FORMAT,
-                ..Default::default()
-            },
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: BUFFER_COUNT as u32,
-            OutputWindow: hwnd,
-            Windowed: true.into(),
-            SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
-            Flags: 0,
-        };
-        let mut swap_chain = None;
-        unsafe {
-            dxgi_factory
-                .CreateSwapChain(device, &legacy_desc, &mut swap_chain)
-                .ok()?
-        };
-        swap_chain.context("Missing legacy swap chain")?
+        graphics_compat::create_legacy_swap_chain(dxgi_factory, device, hwnd, width, height)?
     } else {
         let factory: IDXGIFactory2 = dxgi_factory.cast()?;
         unsafe { factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None)? }.cast()?
@@ -1717,35 +1605,6 @@ fn create_constant_buffer<T>(device: &ID3D11Device) -> Result<Option<ID3D11Buffe
     let mut buffer = None;
     unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer)) }?;
     Ok(buffer)
-}
-
-#[inline]
-fn create_buffer(
-    device: &ID3D11Device,
-    element_size: usize,
-    buffer_size: usize,
-) -> Result<ID3D11Buffer> {
-    let desc = D3D11_BUFFER_DESC {
-        ByteWidth: (element_size * buffer_size) as u32,
-        Usage: D3D11_USAGE_DYNAMIC,
-        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-        CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
-        MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
-        StructureByteStride: element_size as u32,
-    };
-    let mut buffer = None;
-    unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer)) }?;
-    Ok(buffer.unwrap())
-}
-
-#[inline]
-fn create_buffer_view(
-    device: &ID3D11Device,
-    buffer: &ID3D11Buffer,
-) -> Result<Option<ID3D11ShaderResourceView>> {
-    let mut view = None;
-    unsafe { device.CreateShaderResourceView(buffer, None, Some(&mut view)) }?;
-    Ok(view)
 }
 
 #[inline]
